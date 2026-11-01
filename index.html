@@ -272,6 +272,8 @@
       useEffect(() => {
         localStorage.setItem(STORAGE_RATES_KEY, JSON.stringify(liveRates));
       }, [liveRates]);
+      const [rateMode, setRateMode] = useState("buy"); // "buy" (Replacement Rate) | "sell" (~3.2% SafeGold Liquidation Spread)
+      const SELL_SPREAD_FACTOR = 0.968; // ~3.2% SafeGold / MMTC-PAMP buy-sell spread
       const [scanQueue, setScanQueue] = useState([]);
       const [monthlySip, setMonthlySip] = useState(500);
       const [forecastMonths, setForecastMonths] = useState(6);
@@ -594,10 +596,12 @@
         const totalGst = metalTxs.reduce((s, t) => s + Number(t.gst), 0);
         const weightedAvgRate = totalWeight > 0 ? totalMetalValue / totalWeight : 0;
         const breakEvenRate = totalWeight > 0 ? totalPaid / totalWeight : 0;
-        const currentVal = totalWeight * (liveRates[activeMetal] || weightedAvgRate);
+        const baseBuyRate = liveRates[activeMetal] || weightedAvgRate;
+        const effectiveRate = rateMode === "sell" ? Number((baseBuyRate * SELL_SPREAD_FACTOR).toFixed(2)) : baseBuyRate;
+        const currentVal = totalWeight * effectiveRate;
         const netPnL = currentVal - totalPaid;
-        return { totalWeight, totalPaid, totalMetalValue, totalGst, weightedAvgRate, breakEvenRate, currentVal, netPnL, count: metalTxs.length };
-      }, [metalTxs, liveRates, activeMetal]);
+        return { totalWeight, totalPaid, totalMetalValue, totalGst, weightedAvgRate, breakEvenRate, effectiveRate, currentVal, netPnL, count: metalTxs.length };
+      }, [metalTxs, liveRates, activeMetal, rateMode]);
 
  const forecast = useMemo(() => {
         const baseRate = liveRates[activeMetal] || stats.weightedAvgRate || 0;
@@ -815,9 +819,23 @@
                     className="w-24 bg-slate-800 border border-indigo-500/40 focus:border-indigo-400 rounded-lg px-2 py-1 text-right text-xs font-bold text-white outline-none"
                   />
                 </div>
-                <p className="text-xl font-bold mt-1 text-white">₹{stats.currentVal.toFixed(2)}</p>
+                <div className="flex items-center justify-between gap-1 mt-2 bg-slate-950/80 p-1 rounded-lg border border-slate-800 text-[10px] font-semibold">
+                  <button
+                    onClick={() => setRateMode("buy")}
+                    className={`flex-1 py-1 rounded transition ${rateMode === "buy" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
+                  >
+                    Buy Rate (₹{(liveRates[activeMetal] || 0).toFixed(2)})
+                  </button>
+                  <button
+                    onClick={() => setRateMode("sell")}
+                    className={`flex-1 py-1 rounded transition ${rateMode === "sell" ? "bg-amber-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
+                  >
+                    Sell Rate (-3.2%: ₹{((liveRates[activeMetal] || 0) * SELL_SPREAD_FACTOR).toFixed(2)})
+                  </button>
+                </div>
+                <p className="text-xl font-bold mt-1.5 text-white">₹{stats.currentVal.toFixed(2)}</p>
                 <p className={`text-xs font-semibold mt-1 ${stats.netPnL >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {stats.netPnL >= 0 ? "▲ +" : "▼ "}₹{stats.netPnL.toFixed(2)} vs Total Paid
+                  {stats.netPnL >= 0 ? "▲ +" : "▼ "}₹{stats.netPnL.toFixed(2)} vs Total Paid ({rateMode === "sell" ? "Bank Withdrawal" : "Replacement"})
                 </p>
               </div>
             </div>
