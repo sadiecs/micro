@@ -245,7 +245,33 @@
       const [activeMetal, setActiveMetal] = useState("Silver");
       const [unitMode, setUnitMode] = useState("both");
       const [activeTab, setActiveTab] = useState("dashboard");
-      const [liveRates, setLiveRates] = useState({ Silver: 201.89, Gold: 14487.58 });
+      const STORAGE_RATES_KEY = "bv_fresh_rates_v4";
+
+      // Helper to get the chronological latest rate/g from saved PhonePe receipts
+      const getLatestReceiptRates = (txList) => {
+        const latest = { Silver: 186.93, Gold: 14487.58 };
+        ["Silver", "Gold"].forEach(metal => {
+          const filtered = (txList || [])
+            .filter(t => t.metal === metal && Number(t.ratePerGram) > 0)
+            .sort((a, b) => `${a.date}T${to24HourTime(a.time)}`.localeCompare(`${b.date}T${to24HourTime(b.time)}`));
+          if (filtered.length > 0) {
+            latest[metal] = Number(filtered[filtered.length - 1].ratePerGram);
+          }
+        });
+        return latest;
+      };
+
+      const [liveRates, setLiveRates] = useState(() => {
+        const savedRates = localStorage.getItem(STORAGE_RATES_KEY);
+        if (savedRates) {
+          try { return JSON.parse(savedRates); } catch (_) {}
+        }
+        return getLatestReceiptRates(transactions);
+      });
+
+      useEffect(() => {
+        localStorage.setItem(STORAGE_RATES_KEY, JSON.stringify(liveRates));
+      }, [liveRates]);
       const [scanQueue, setScanQueue] = useState([]);
       const [monthlySip, setMonthlySip] = useState(500);
       const [forecastMonths, setForecastMonths] = useState(6);
@@ -391,6 +417,7 @@
 
             const repaired = repairSavedTimestamps(pulledTxs);
             setTransactions(repaired);
+            setLiveRates(getLatestReceiptRates(repaired));
             setSyncStatus("success");
             setSyncMsg(`✓ Pulled ${repaired.length} transactions from Cloud!`);
           }
@@ -611,7 +638,9 @@
           try {
             const data = JSON.parse(ev.target.result);
             if (Array.isArray(data.transactions)) {
-              setTransactions(repairSavedTimestamps(data.transactions));
+              const repaired = repairSavedTimestamps(data.transactions);
+              setTransactions(repaired);
+              setLiveRates(getLatestReceiptRates(repaired));
               alert(`Restored ${data.transactions.length} transactions!`);
             }
           } catch {
@@ -767,14 +796,23 @@
                 <p className="text-xs text-slate-400 mt-1">Pure Metal: ₹{stats.totalMetalValue.toFixed(2)} • GST: ₹{stats.totalGst.toFixed(2)}</p>
               </div>
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-slate-400">Live Market Rate (₹/g)</p>
+                <div className="flex items-center justify-between gap-1">
+                  <div>
+                    <p className="text-xs text-slate-400">Live Market Rate (₹/g)</p>
+                    <button
+                      onClick={() => setLiveRates(getLatestReceiptRates(transactions))}
+                      title="Set to latest PhonePe receipt rate"
+                      className="text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold"
+                    >
+                      ↻ Use Latest Receipt
+                    </button>
+                  </div>
                   <input
                     type="number"
-                    step="0.1"
+                    step="0.01"
                     value={liveRates[activeMetal]}
                     onChange={(e) => setLiveRates(prev => ({ ...prev, [activeMetal]: parseFloat(e.target.value) || 0 }))}
-                    className="w-24 bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-right text-xs font-bold text-white"
+                    className="w-24 bg-slate-800 border border-indigo-500/40 focus:border-indigo-400 rounded-lg px-2 py-1 text-right text-xs font-bold text-white outline-none"
                   />
                 </div>
                 <p className="text-xl font-bold mt-1 text-white">₹{stats.currentVal.toFixed(2)}</p>
