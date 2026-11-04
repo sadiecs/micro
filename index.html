@@ -22,7 +22,6 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo } = React;
 
-    // One-time cleanup of old localStorage keys that caused false SHA-256 duplicate blocks
     const CLEANUP_FLAG = "bv_legacy_cleaned_v4";
     if (!localStorage.getItem(CLEANUP_FLAG)) {
       [
@@ -46,7 +45,6 @@
       return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
     }
 
-    // 1. Decode exact Date & Time embedded inside PhonePe Transaction ID (e.g. NB261023174548...)
     function decodePhonePeTxTimestamp(txId) {
       if (!txId) return null;
       const m = String(txId).trim().toUpperCase().match(/^(?:NB|T)(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\d+$/);
@@ -65,7 +63,6 @@
       return { date: dateStr, time: timeStr };
     }
 
-    // 2. Fallback: Decode Date & Time from Android Screenshot filename if needed
     function decodeFilenameTimestamp(fileName = "") {
       const m = fileName.match(/(\d{4})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})/);
       if (!m) return null;
@@ -92,7 +89,6 @@
       return `${String(h).padStart(2, "0")}:${min}`;
     }
 
-    // Smart RegEx + Math Cross-Verification Parser for PhonePe Receipts
     function parsePhonePeOCRText(rawText, fileName = "") {
       const text = rawText.replace(/\r/g, " ");
 
@@ -101,7 +97,6 @@
       const metal = isGold ? "Gold" : isSilver ? "Silver" : "Silver";
       const provider = /MMTC[\s-]*PAMP/i.test(text) ? "MMTC-PAMP" : "SafeGold";
 
-      // Extract PhonePe Transaction ID (tolerant of spaces or 'O' -> '0' inside ID)
       const cleanedForId = text.replace(/NB\s+/gi, "NB").replace(/NB([0-9O]{18,28})/gi, (full) => full.replace(/O/gi, "0"));
       const txIdMatch = cleanedForId.match(/\b(NB\d{18,28}|T\d{18,28})\b/i);
       const transactionId = txIdMatch ? txIdMatch[1].toUpperCase() : "";
@@ -112,7 +107,6 @@
       let dateStr = decodedTx?.date || decodedFile?.date || new Date().toISOString().slice(0, 10);
       let timeStr = decodedTx?.time || decodedFile?.time || "12:00 pm";
 
-      // Extract Date & Time from Receipt Header ("05:45 pm on 23 Oct 2026")
       const normalizedHeader = text.replace(/\b[QO](\d[:.]\d{2})/g, "0$1");
       const bannerTimeMatch =
         normalizedHeader.match(/([0-1]?\d)\s*[:.]\s*([0-5]\d)\s*(am|pm)\s*(?:on\b)?/i) ||
@@ -134,7 +128,6 @@
         dateStr = `${yr}-${mon}-${day}`;
       }
 
-      // Guarantee exact timestamp if PhonePe Transaction ID is present
       if (decodedTx) {
         if (!bannerTimeMatch) timeStr = decodedTx.time;
         if (!dateMatch) dateStr = decodedTx.date;
@@ -231,7 +224,6 @@
     }
 
     function App() {
-      // Fresh empty transaction state (hashes are derived dynamically from active transactions!)
       const [transactions, setTransactions] = useState(() => {
         const saved = localStorage.getItem(STORAGE_TX_KEY);
         return saved ? repairSavedTimestamps(JSON.parse(saved)) : [];
@@ -245,35 +237,7 @@
       const [activeMetal, setActiveMetal] = useState("Silver");
       const [unitMode, setUnitMode] = useState("both");
       const [activeTab, setActiveTab] = useState("dashboard");
-      const STORAGE_RATES_KEY = "bv_fresh_rates_v4";
-
-      // Helper to get the chronological latest rate/g from saved PhonePe receipts
-      const getLatestReceiptRates = (txList) => {
-        const latest = { Silver: 186.93, Gold: 14487.58 };
-        ["Silver", "Gold"].forEach(metal => {
-          const filtered = (txList || [])
-            .filter(t => t.metal === metal && Number(t.ratePerGram) > 0)
-            .sort((a, b) => `${a.date}T${to24HourTime(a.time)}`.localeCompare(`${b.date}T${to24HourTime(b.time)}`));
-          if (filtered.length > 0) {
-            latest[metal] = Number(filtered[filtered.length - 1].ratePerGram);
-          }
-        });
-        return latest;
-      };
-
-      const [liveRates, setLiveRates] = useState(() => {
-        const savedRates = localStorage.getItem(STORAGE_RATES_KEY);
-        if (savedRates) {
-          try { return JSON.parse(savedRates); } catch (_) {}
-        }
-        return getLatestReceiptRates(transactions);
-      });
-
-      useEffect(() => {
-        localStorage.setItem(STORAGE_RATES_KEY, JSON.stringify(liveRates));
-      }, [liveRates]);
-      const [rateMode, setRateMode] = useState("buy"); // "buy" (Replacement Rate) | "sell" (~3.2% SafeGold Liquidation Spread)
-      const SELL_SPREAD_FACTOR = 0.968; // ~3.2% SafeGold / MMTC-PAMP buy-sell spread
+      const [liveRates, setLiveRates] = useState({ Silver: 201.89, Gold: 14487.58 });
       const [scanQueue, setScanQueue] = useState([]);
       const [monthlySip, setMonthlySip] = useState(500);
       const [forecastMonths, setForecastMonths] = useState(6);
@@ -286,14 +250,51 @@
         localStorage.setItem(STORAGE_PWD_KEY, syncPassword);
       }, [syncPassword]);
 
-      async function getPasswordHash(password) {
-        const cleanPwd = password.trim();
+      async function getPasswordHash(password, normalizeCase = false) {
+        const cleanPwd = normalizeCase ? password.trim().toLowerCase() : password.trim();
         const msgUint8 = new TextEncoder().encode("bullion-vault-salt-v2-" + cleanPwd);
         const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
         return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
       }
 
-      // Auto-provisioning JSON storage bin on the fly tied to your SHA-256 password hash (Zero 404s, Zero API Keys)
+      function packTransactions(txs) {
+        return txs.map(t => [
+          t.metal === "Gold" ? "G" : "S",
+          t.provider === "MMTC-PAMP" ? "M" : "S",
+          t.date,
+          t.time,
+          t.ratePerGram,
+          t.weightGrams,
+          t.metalValue,
+          t.gst,
+          t.totalAmount,
+          t.transactionId || "",
+          (t.fileHash || "").slice(0, 16)
+        ]);
+      }
+
+      function unpackTransactions(packed) {
+        if (!Array.isArray(packed)) return [];
+        return packed.map((row, idx) => {
+          if (!Array.isArray(row)) return row;
+          return {
+            id: `tx-sync-${Date.now()}-${idx}`,
+            metal: row[0] === "G" ? "Gold" : "Silver",
+            provider: row[1] === "M" ? "MMTC-PAMP" : "SafeGold",
+            date: row[2],
+            time: row[3],
+            ratePerGram: Number(row[4]),
+            weightGrams: Number(row[5]),
+            metalValue: Number(row[6]),
+            gst: Number(row[7]),
+            totalAmount: Number(row[8]),
+            transactionId: row[9] || `MANUAL-${idx}`,
+            fileHash: row[10] || "",
+            source: "Cloud Synced"
+          };
+        });
+      }
+
       const syncWithPasswordCloud = async (txs, mode = "push", showAlert = true) => {
         if (!syncPassword || syncPassword.trim().length < 4) {
           if (showAlert) {
@@ -303,123 +304,86 @@
           return;
         }
         setSyncStatus("syncing");
-        setSyncMsg(mode === "push" ? "Provisioning cloud bin & uploading portfolio..." : "Downloading portfolio from cloud bin...");
+        setSyncMsg(mode === "push" ? "Uploading portfolio to cloud..." : "Downloading portfolio from cloud...");
 
         try {
-          const binKey = await getPasswordHash(syncPassword);
-          const topicChannel = `bv_sync_bin_${binKey}`;
+          const normKey = await getPasswordHash(syncPassword, true);
+          const exactKey = await getPasswordHash(syncPassword, false);
+          const primaryTopic = `bv_sync_bin_${normKey}`;
+          const legacyTopic = `bv_sync_bin_${exactKey}`;
 
           if (mode === "push") {
             const repairedTxs = repairSavedTimestamps(txs);
-            const payloadStr = JSON.stringify({
-              updatedAt: new Date().toISOString(),
-              transactions: repairedTxs
+            const compactPacket = JSON.stringify({
+              u: new Date().toISOString(),
+              p: packTransactions(repairedTxs)
             });
 
-            // 1. Provision a fresh JSONBlob storage bin on the fly if Payload > 3KB, or push directly
-            let blobUrl = localStorage.getItem(`bv_blob_url_${binKey}`) || "";
-            let storedInBlob = false;
-
-            try {
-              if (blobUrl) {
-                const putRes = await fetch(blobUrl, {
-                  method: "PUT",
-                  headers: { "Content-Type": "application/json", "Accept": "application/json" },
-                  body: payloadStr
-                });
-                if (putRes.ok) storedInBlob = true;
-              }
-              if (!storedInBlob) {
-                const postRes = await fetch("https://jsonblob.com/api/jsonBlob", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", "Accept": "application/json" },
-                  body: payloadStr
-                });
-                if (postRes.ok) {
-                  const loc = postRes.headers.get("Location") || postRes.headers.get("location") || postRes.headers.get("X-jsonblob");
-                  if (loc) {
-                    blobUrl = loc.startsWith("http") ? loc : `https://jsonblob.com/api/jsonBlob/${loc.split("/").pop()}`;
-                    blobUrl = blobUrl.replace(/^http:/, "https:");
-                    localStorage.setItem(`bv_blob_url_${binKey}`, blobUrl);
-                    storedInBlob = true;
-                  }
-                }
-              }
-            } catch (_) {
-              // Fallback to direct relay payload if JSONBlob CORS is blocked on a specific network
-            }
-
-            // 2. Broadcast the auto-provisioned bin pointer + full JSON backup to the deterministic SHA-256 channel
-            // Ntfy.sh automatically provisions any topic channel on the fly with zero 404s and 100% CORS support
-            const relayPacket = JSON.stringify({
-              updatedAt: new Date().toISOString(),
-              blobUrl: storedInBlob ? blobUrl : null,
-              transactions: repairedTxs
-            });
-
-            const res = await fetch(`${CLOUD_SYNC_RELAY}/${topicChannel}`, {
+            const res = await fetch(`${CLOUD_SYNC_RELAY}/${primaryTopic}`, {
               method: "POST",
-              body: relayPacket
+              headers: { "Title": "BullionVault Sync" },
+              body: compactPacket
             });
+
+            if (primaryTopic !== legacyTopic) {
+              fetch(`${CLOUD_SYNC_RELAY}/${legacyTopic}`, { method: "POST", body: compactPacket }).catch(() => {});
+            }
 
             if (!res.ok) throw new Error(`Cloud Push Failed (HTTP ${res.status})`);
 
             setSyncStatus("success");
-            setSyncMsg(`✓ Pushed ${repairedTxs.length} transactions to Cloud! Now click "Pull from Cloud" on your mobile.`);
+            setSyncMsg(`✓ Pushed ${repairedTxs.length} transactions to Cloud! Now click "Pull from Cloud" on your other device.`);
           } else {
-            // Pull latest snapshot from the deterministic SHA-256 channel
-            const res = await fetch(`${CLOUD_SYNC_RELAY}/${topicChannel}/json?poll=1&since=all`, {
-              method: "GET"
-            });
+            const fetchFromTopic = async (topic) => {
+              const res = await fetch(`${CLOUD_SYNC_RELAY}/${topic}/json?poll=1&since=all`, {
+                method: "GET",
+                cache: "no-store"
+              });
+              if (!res.ok) return null;
+              const rawLines = (await res.text()).trim();
+              if (!rawLines) return null;
 
-            if (!res.ok) throw new Error(`Cloud Pull Failed (HTTP ${res.status})`);
+              const lines = rawLines.split("\n").filter(Boolean);
+              for (let i = lines.length - 1; i >= 0; i--) {
+                try {
+                  const event = JSON.parse(lines[i]);
+                  if (event.event !== "message") continue;
 
-            const rawLines = (await res.text()).trim();
-            if (!rawLines) {
+                  let parsedMsg = null;
+                  if (event.message && event.message.trim().startsWith("{")) {
+                    parsedMsg = JSON.parse(event.message);
+                  } else if (event.attachment && event.attachment.url) {
+                    const attRes = await fetch(event.attachment.url, { cache: "no-store" });
+                    if (attRes.ok) parsedMsg = await attRes.json();
+                  }
+
+                  if (parsedMsg) {
+                    if (Array.isArray(parsedMsg.p)) return unpackTransactions(parsedMsg.p);
+                    if (Array.isArray(parsedMsg.transactions)) return parsedMsg.transactions;
+                    if (parsedMsg.blobUrl) {
+                      const blobRes = await fetch(parsedMsg.blobUrl, { headers: { "Accept": "application/json" } });
+                      if (blobRes.ok) {
+                        const blobJson = await blobRes.json();
+                        if (blobJson && Array.isArray(blobJson.transactions)) return blobJson.transactions;
+                      }
+                    }
+                  }
+                } catch (_) {}
+              }
+              return null;
+            };
+
+            let pulledTxs = await fetchFromTopic(primaryTopic);
+            if (!pulledTxs && primaryTopic !== legacyTopic) {
+              pulledTxs = await fetchFromTopic(legacyTopic);
+            }
+
+            if (!Array.isArray(pulledTxs)) {
               throw new Error("No cloud data found for this password yet. Click 'Save & Push Sync' on your primary device first!");
             }
-
-            const lines = rawLines.split("\n").filter(Boolean);
-            let latestData = null;
-
-            for (let i = lines.length - 1; i >= 0; i--) {
-              try {
-                const event = JSON.parse(lines[i]);
-                if (event.event === "message" && event.message) {
-                  const parsedMsg = JSON.parse(event.message);
-                  if (parsedMsg && (Array.isArray(parsedMsg.transactions) || parsedMsg.blobUrl)) {
-                    latestData = parsedMsg;
-                    break;
-                  }
-                }
-              } catch (_) {}
-            }
-
-            if (!latestData) {
-              throw new Error("No cloud data found for this password yet. Click 'Save & Push Sync' on your primary device first!");
-            }
-
-            let pulledTxs = latestData.transactions;
-
-            // If a JSONBlob bin pointer was attached, fetch from the bin first with automatic fallback to inline transactions
-            if (latestData.blobUrl) {
-              try {
-                const blobRes = await fetch(latestData.blobUrl, { headers: { "Accept": "application/json" } });
-                if (blobRes.ok) {
-                  const blobJson = await blobRes.json();
-                  if (blobJson && Array.isArray(blobJson.transactions)) {
-                    pulledTxs = blobJson.transactions;
-                    localStorage.setItem(`bv_blob_url_${binKey}`, latestData.blobUrl);
-                  }
-                }
-              } catch (_) {}
-            }
-
-            if (!Array.isArray(pulledTxs)) throw new Error("Invalid cloud data format.");
 
             const repaired = repairSavedTimestamps(pulledTxs);
             setTransactions(repaired);
-            setLiveRates(getLatestReceiptRates(repaired));
             setSyncStatus("success");
             setSyncMsg(`✓ Pulled ${repaired.length} transactions from Cloud!`);
           }
@@ -443,10 +407,9 @@
         return `${grams.toFixed(4)} g (${mg.toFixed(1)} mg)`;
       };
 
-      // Checks duplicate ONLY against currently active transactions in your ledger
       const checkDuplicate = (candidate, hash = null) => {
         for (const tx of transactions) {
-          if (hash && tx.fileHash && tx.fileHash === hash) {
+          if (hash && tx.fileHash && (tx.fileHash === hash || hash.startsWith(tx.fileHash) || tx.fileHash.startsWith(hash))) {
             return { isDup: true, reason: "Already in Portfolio (Exact Image Match)" };
           }
           if (candidate.transactionId && !candidate.transactionId.startsWith("MANUAL") && tx.transactionId === candidate.transactionId) {
@@ -596,25 +559,18 @@
         const totalGst = metalTxs.reduce((s, t) => s + Number(t.gst), 0);
         const weightedAvgRate = totalWeight > 0 ? totalMetalValue / totalWeight : 0;
         const breakEvenRate = totalWeight > 0 ? totalPaid / totalWeight : 0;
-        const baseBuyRate = liveRates[activeMetal] || weightedAvgRate;
-        const effectiveRate = rateMode === "sell" ? Number((baseBuyRate * SELL_SPREAD_FACTOR).toFixed(2)) : baseBuyRate;
-        const currentVal = totalWeight * effectiveRate;
+        const currentVal = totalWeight * (liveRates[activeMetal] || weightedAvgRate);
         const netPnL = currentVal - totalPaid;
-        return { totalWeight, totalPaid, totalMetalValue, totalGst, weightedAvgRate, breakEvenRate, effectiveRate, currentVal, netPnL, count: metalTxs.length };
-      }, [metalTxs, liveRates, activeMetal, rateMode]);
+        return { totalWeight, totalPaid, totalMetalValue, totalGst, weightedAvgRate, breakEvenRate, currentVal, netPnL, count: metalTxs.length };
+      }, [metalTxs, liveRates, activeMetal]);
 
- const forecast = useMemo(() => {
+      const forecast = useMemo(() => {
         const baseRate = liveRates[activeMetal] || stats.weightedAvgRate || 0;
         if (baseRate === 0) return { projectedRate: 0, futureGrams: 0, projectedValue: 0, futureInvested: 0 };
 
-        // Realistic 1% monthly appreciation (~12% annual return)
         const monthlyGrowthRate = 0.01;
         const projectedRate = baseRate * (1 + monthlyGrowthRate * forecastMonths);
-
-        // Total new capital invested over the chosen months
         const futureInvested = monthlySip * forecastMonths;
-
-        // Exact 3% GST deduction (Total / 1.03) bought at the average rate during the period
         const netMetalCapital = futureInvested / 1.03;
         const avgPurchaseRate = (baseRate + projectedRate) / 2;
         const addedGrams = netMetalCapital / avgPurchaseRate;
@@ -624,7 +580,6 @@
 
         return { projectedRate, futureGrams, projectedValue, futureInvested };
       }, [stats, liveRates, activeMetal, monthlySip, forecastMonths]);
-      
 
       const exportBackup = () => {
         const blob = new Blob([JSON.stringify({ transactions }, null, 2)], { type: "application/json" });
@@ -642,9 +597,7 @@
           try {
             const data = JSON.parse(ev.target.result);
             if (Array.isArray(data.transactions)) {
-              const repaired = repairSavedTimestamps(data.transactions);
-              setTransactions(repaired);
-              setLiveRates(getLatestReceiptRates(repaired));
+              setTransactions(repairSavedTimestamps(data.transactions));
               alert(`Restored ${data.transactions.length} transactions!`);
             }
           } catch {
@@ -664,7 +617,7 @@
                   <h1 className="font-bold text-base sm:text-lg leading-tight flex items-center gap-2">
                     BullionVault
                     <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                      Fresh Clean v4 • Exact Date/Time OCR
+                      Fresh Clean v5 • Compact Cloud Sync
                     </span>
                   </h1>
                   <p className="text-xs text-slate-400">Micro Gold & Silver Tracker (Grams & Milligrams)</p>
@@ -723,8 +676,8 @@
                   <button onClick={() => setShowPasswordModal(false)} className="text-slate-400 hover:text-white text-lg">✕</button>
                 </div>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  1. Enter your secret password on your <b>PC</b> and click <b>"✓ Save & Push Sync"</b>.<br/>
-                  2. Open your <b>Mobile</b>, enter the <b>exact same password</b>, and click <b>"⬇ Pull from Cloud"</b>!
+                  1. Enter your secret password on your <b>PC / Main Phone</b> and click <b>"✓ Save & Push Sync"</b>.<br/>
+                  2. Open your <b>Other Device</b>, enter the <b>exact same password</b>, and click <b>"⬇ Pull from Cloud"</b>!
                 </p>
                 <div>
                   <label className="text-xs font-semibold text-slate-300">Secret Sync Password</label>
@@ -800,42 +753,19 @@
                 <p className="text-xs text-slate-400 mt-1">Pure Metal: ₹{stats.totalMetalValue.toFixed(2)} • GST: ₹{stats.totalGst.toFixed(2)}</p>
               </div>
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-                <div className="flex items-center justify-between gap-1">
-                  <div>
-                    <p className="text-xs text-slate-400">Live Market Rate (₹/g)</p>
-                    <button
-                      onClick={() => setLiveRates(getLatestReceiptRates(transactions))}
-                      title="Set to latest PhonePe receipt rate"
-                      className="text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold"
-                    >
-                      ↻ Use Latest Receipt
-                    </button>
-                  </div>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-slate-400">Live Market Rate (₹/g)</p>
                   <input
                     type="number"
-                    step="0.01"
+                    step="0.1"
                     value={liveRates[activeMetal]}
                     onChange={(e) => setLiveRates(prev => ({ ...prev, [activeMetal]: parseFloat(e.target.value) || 0 }))}
-                    className="w-24 bg-slate-800 border border-indigo-500/40 focus:border-indigo-400 rounded-lg px-2 py-1 text-right text-xs font-bold text-white outline-none"
+                    className="w-24 bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-right text-xs font-bold text-white"
                   />
                 </div>
-                <div className="flex items-center justify-between gap-1 mt-2 bg-slate-950/80 p-1 rounded-lg border border-slate-800 text-[10px] font-semibold">
-                  <button
-                    onClick={() => setRateMode("buy")}
-                    className={`flex-1 py-1 rounded transition ${rateMode === "buy" ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}
-                  >
-                    Buy Rate (₹{(liveRates[activeMetal] || 0).toFixed(2)})
-                  </button>
-                  <button
-                    onClick={() => setRateMode("sell")}
-                    className={`flex-1 py-1 rounded transition ${rateMode === "sell" ? "bg-amber-500 text-slate-950 font-bold" : "text-slate-400 hover:text-white"}`}
-                  >
-                    Sell Rate (-3.2%: ₹{((liveRates[activeMetal] || 0) * SELL_SPREAD_FACTOR).toFixed(2)})
-                  </button>
-                </div>
-                <p className="text-xl font-bold mt-1.5 text-white">₹{stats.currentVal.toFixed(2)}</p>
+                <p className="text-xl font-bold mt-1 text-white">₹{stats.currentVal.toFixed(2)}</p>
                 <p className={`text-xs font-semibold mt-1 ${stats.netPnL >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                  {stats.netPnL >= 0 ? "▲ +" : "▼ "}₹{stats.netPnL.toFixed(2)} vs Total Paid ({rateMode === "sell" ? "Bank Withdrawal" : "Replacement"})
+                  {stats.netPnL >= 0 ? "▲ +" : "▼ "}₹{stats.netPnL.toFixed(2)} vs Total Paid
                 </p>
               </div>
             </div>
