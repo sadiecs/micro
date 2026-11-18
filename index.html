@@ -237,7 +237,27 @@
       const [activeMetal, setActiveMetal] = useState("Silver");
       const [unitMode, setUnitMode] = useState("both");
       const [activeTab, setActiveTab] = useState("dashboard");
-      const [liveRates, setLiveRates] = useState({ Silver: 201.89, Gold: 14487.58 });
+      // Manual overrides only (typed by you, not saved across refresh).
+      // By default the "market" rate = rate of your most recent purchase.
+      const [manualRates, setManualRates] = useState({});
+      const latestRates = useMemo(() => {
+        const out = {};
+        ["Silver", "Gold"].forEach(m => {
+          const list = transactions
+            .filter(t => t.metal === m && t.ratePerGram > 0)
+            .sort((a, b) => `${b.date}T${to24HourTime(b.time)}`.localeCompare(`${a.date}T${to24HourTime(a.time)}`));
+          out[m] = list.length ? list[0].ratePerGram : 0;
+        });
+        return out;
+      }, [transactions]);
+      const liveRates = useMemo(() => {
+        const out = {};
+        ["Silver", "Gold"].forEach(m => {
+          const v = parseFloat(manualRates[m]);
+          out[m] = v > 0 ? v : latestRates[m];
+        });
+        return out;
+      }, [manualRates, latestRates]);
       const [scanQueue, setScanQueue] = useState([]);
       const [monthlySip, setMonthlySip] = useState(500);
       const [forecastMonths, setForecastMonths] = useState(6);
@@ -516,7 +536,7 @@
         setTransactions(updatedTxs);
         setActiveMetal(ext.metal);
         if (ext.ratePerGram > 0) {
-          setLiveRates(prev => ({ ...prev, [ext.metal]: ext.ratePerGram }));
+          setManualRates(prev => ({ ...prev, [ext.metal]: undefined }));
         }
         setScanQueue(prev => prev.map(i => i.id === queueItem.id ? { ...i, status: "saved" } : i));
 
@@ -758,8 +778,8 @@
                   <input
                     type="number"
                     step="0.1"
-                    value={liveRates[activeMetal]}
-                    onChange={(e) => setLiveRates(prev => ({ ...prev, [activeMetal]: parseFloat(e.target.value) || 0 }))}
+                    value={manualRates[activeMetal] ?? liveRates[activeMetal]}
+                    onChange={(e) => setManualRates(prev => ({ ...prev, [activeMetal]: e.target.value }))}
                     className="w-24 bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-right text-xs font-bold text-white"
                   />
                 </div>
